@@ -1,0 +1,247 @@
+---
+title: "Turnout project"
+author: "Erika Burkhart"
+date: "4/16/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(RColorBrewer)
+library(knitr)
+library(tidyverse)
+library(sjmisc)
+library(stringr)
+opts_chunk$set(echo = TRUE, warnings = FALSE, messages = FALSE)
+```
+
+## Data wrangling
+
+
+2020
+```{r}
+# data from Maricopa County Recorder: https://recorder.maricopa.gov/electionarchives/2020/11-03-2020-2b%20Final%20SOV%20and%20Official%20Canvass%20Report%20NOV2020.txt
+
+raw_2020 <- read_delim("data/11-03-2020-2b Final SOV and Official Canvass Report NOV2020.txt")
+glimpse(raw_2020)
+```
+
+
+
+```{r}
+# Unified School District
+## create a dataframe with only the type of school district race, and create number of candidates unique_ and Vote Total
+sb_2020_usd <- raw_2020 %>%
+  filter(CandidateType == "R" & ContestType == "Candidacy" & str_detect(ContestName, "GBM") & str_detect(ContestName, "USD") & str_detect(ContestName, "4yr")) %>%
+  group_by(PrecinctId) %>%
+  mutate(unique_usd = n_distinct(CandidateName)) %>%
+  mutate(VoteTotal_usd = sum(Votes))
+## drop unnecessary columns
+sb2020usd <- sb_2020_usd %>%
+  select(ContestId, ContestName, ContestVoteFor, ContestOrder, PrecinctId, PrecinctName, PrecinctRegistered, PrecinctTurnout, PrecinctTurnoutPerc, Registered, Turnout, TurnoutPerc, VoteTotal_usd, unique_usd)
+## omit na's 
+sb2020usd <- na.omit(sb2020usd)
+# remove precincts where there is school board overlap. This is not ideal at all, but we are assuming that these overlaps are not correlated with turnout for the purposes of this project
+sb2020usd <- subset(sb2020usd, (unique_usd < 7) | (str_detect(sb2020usd$ContestName, "Peoria") & sb2020usd$unique_usd == 9))
+# Check to make sure the outcomes look reasonable
+aggregate(sb2020usd$VoteTotal_usd ~ sb2020usd$ContestName, FUN = sum)
+# add turnout
+sb2020usd$usd_turnout <- sb2020usd$VoteTotal_usd/sb2020usd$Registered
+# Condense rows so that we only keep the precinct level data
+sb2020usd <- sb2020usd %>%
+  distinct()
+sb2020usd <- sb2020usd %>%
+  select(PrecinctId, PrecinctName, ContestName, VoteTotal_usd, unique_usd, usd_turnout)
+
+# President - create precinct level results for president
+usdpres_2020 <- raw_2020 %>%
+  filter(ContestName == "Presidential Electors") %>%
+  group_by(PrecinctId) %>%
+  mutate(PresVote = sum(Votes)) %>%
+  mutate(PresTurn = PresVote/Registered) %>%
+  select(PrecinctId, PrecinctName, PrecinctRegistered, PrecinctTurnout, PrecinctTurnoutPerc, Registered, Turnout, TurnoutPerc, PresVote, PresTurn) %>%
+  distinct()
+
+
+
+# Merge the two
+complete2020 <- left_join(usdpres_2020, sb2020usd, by = c("PrecinctId", "PrecinctName"), suffix = c("PrecinctId", "PrecinctName"))
+```
+
+
+
+## Demographic Data
+```{r}
+usd_names <- unique(sb_2020_usd$ContestName)
+usd_names
+
+# Data from US Census ACS 5-year estimates 2020, unified school district level results. Downloaded from Social Explorer May 2022. I altered the output in Excel to make it easier to read.
+demo_2020 <- read_csv("data/usd_2020_demo.csv")
+
+# add demo variables to complete dataset
+complete2020$usd_name <- demo_2020$usd_name[match(complete2020$ContestName, demo_2020$ContestName)]
+complete2020$mhi_2020_dollar <- demo_2020$mhi_2020_dollar[match(complete2020$ContestName, demo_2020$ContestName)]
+complete2020$kids_in_house_pct <-  demo_2020$kids_in_house_pct[match(complete2020$ContestName, demo_2020$ContestName)]
+complete2020$hs_only_pct <- demo_2020$hs_only_pct[match(complete2020$ContestName, demo_2020$ContestName)]
+complete2020$college_plus_pct <- demo_2020$collegel_plus_pct[match(complete2020$ContestName, demo_2020$ContestName)]
+complete2020$white_pct<- demo_2020$white_pct[match(complete2020$ContestName, demo_2020$ContestName)]
+
+
+
+complete2020 <- complete2020 %>%
+  separate(usd_name, sep = ",",
+           into = c("usd_name", "state"))
+
+
+complete2020$unique_usd <- as.numeric(complete2020$unique_usd)
+
+
+```
+
+## Research Question
+What drives turnout in school board elections? Does it increase automatically with presidential turnout?
+
+## Data Disclosures
+I set out with an ambitious set of questions. However, both because of the length of the project (three plots which I have extended to five by joining two of them) and because of the time it took me to get the data into the format that I wanted, I am presenting this more as an initial run of what will be a larger and more complete project in the future.
+
+I have limited the data to 2020, Maricopa County, Unified School Districts. Because there are a range of elementary and high school districts with odd geographic overlaps, this seemed neater. Because precincts are not perfectly nested within districts, I dropped the precincts which overlapped multiple unified districts. I am assuming that those district boundaries are not correlated with the dependent variable. 
+
+Precinct-level demographic data are tricky to obtain as precinct is not a census geography. I found one shapefile with some incomplete precinct level data, but working with it was difficult. I ultimately decided to use district-level attributes to illustrate differences between districts visually.
+
+
+## Analysis
+
+```{r}
+# Because we only have school district level data for demographic measures, meaning the demographics will be the same across precincts within a district. We can think of this as a fixed effect model:
+model_1 <- lm(usd_turnout ~ PresTurn + unique_usd + usd_name, data = complete2020)
+summary(model_1)
+
+# And compare the model fit versus just Presidential Turnout:
+model_2 <- lm(usd_turnout ~ PresTurn, data = complete2020)
+summary(model_2)
+```
+
+
+I ran a linear regression, even though I do not plan to display those results visually. Because we only have district level data for demographic measures, we can't include them in a standard ols regression. I ran one model which used district as categorical variable (using Peoria as a baseline) to compare the model fit. Presidential Turnout is statistically significant in either model. For Model 2, an increase of one percentage point in presidential turnout will yield roughly the same increase in school board turnout. I feel comfortable presenting the two variables as a relationship (scatter plot).
+
+
+## Visualizations
+
+```{r fig.width=12}
+# Scatter
+require("gridExtra")
+
+scatter1 <- complete2020 %>%
+  ggplot(aes(x = PresTurn,
+             y = usd_turnout)) +
+  geom_point(alpha = .25) +
+  geom_smooth(method = "lm") +
+  theme_minimal() +
+  scale_y_continuous(limits = c(0.75, 2.5), labels = scales::percent_format(scale = 100)) +
+  scale_x_continuous(limits = c(0.5, 1), labels = scales::percent_format(scale = 100)) +
+  labs(title = "Election turnout for school board depends on presidential turnout,",
+       subtitle = "Maricopa County Unified School Board Elections 2020",
+       x = "Turnout for President*",
+       y = "Turnout for School Board*",
+       caption = "*most school board elections are 'vote for 3' so percent may exceed 100 \n \n data from Maricopa County Recorder")
+
+scatter2 <- complete2020 %>%
+  filter(usd_name == "Chandler Unified District" | usd_name == "Mesa Unified District") %>%
+  ggplot(aes(x = PresTurn,
+             y = usd_turnout,
+             color = usd_name)) +
+  geom_point(show.legend = FALSE) +
+  geom_smooth(method = "lm", se = FALSE, show.legend = FALSE) +
+  geom_text(label = "Mesa Unified District",
+            x = .6, y = 1.4, color = "#d95f02") +
+  geom_text(label = "Chandler Unified District",
+            x = .85, y = .81, color = "#1b9e77") +
+  scale_color_brewer(palette = "Dark2") +
+  theme(legend.position = "none") +
+  theme_minimal() +
+  scale_y_continuous(limits = c(0.75, 2.5), labels = scales::percent_format(scale = 100)) +
+  scale_x_continuous(limits = c(0.5, 1), labels = scales::percent_format(scale = 100)) +
+  labs(title = "but there's significant variation between districts",
+       subtitle = "Compare 2020 turnout for two Maricopa County school districts",
+       x = "Turnout for President*",
+       y = "Turnout for School Board*",
+       caption = "*most school board elections are 'vote for 3' so percent may exceed 100 \n \n data from Maricopa County Recorder")
+
+grid.arrange(scatter1, scatter2, ncol = 2)
+  
+
+
+```
+
+
+I chose these two plots to put side by side to tell a story: presidential turnout in a precinct is positively correlated with school board turnout. Because my typical audience is not going to automatically understand a regression table, the first of these plots visualizes that correlation. I include the standard error range to illustrate that this is an estimate. I then keep the same axis limits and breaks and narrow the data down to two districts. it's easy to see how the first plot masks a lot of heterogeneity between districts. I only selected two because the density of the graph would be overwhelming otherwise. I like that we keep one of the most noticeable outliers in the second plot: I can swap back and forth and see how these points emerged from the first plot.
+
+I note in both that most school board elections are "vote for 3", meaning that voters can vote for up to three candidates. This often proves confusing when talking about school board level election results; it is common to have more votes than there are registered voters. There's not a way that I am aware of to determine how many voters voted at least once in a school board race, and ultimately that doesn't matter for campaign planning. For that reason, I use number of votes cast in the election divided by number of registered voters for both the school board and presidential turnout. I selected titles that I felt guided the reader to the appropriate information. I selected x and y axes that showed a relationship rather than starting at zero. We're looking at a relationship between rates rather than amounts, so I felt this was the clearer option.
+
+I chose Turnout for President as the x-axis because I work with school board candidates. Often consultants, local political parties, and others will have estimates for turnout in a given district. That generally means top of ticket turnout (very few people are skipping past President to vote for County Board of Supervisors). This means we are estimating school board turnout based on top of ticket turnout.
+
+```{r}
+# We can use visualization to explain some of the ways that districts differ
+complete2020 %>%
+  na.omit(usd_name) %>%
+  group_by(usd_name) %>%
+  summarize(m = mean(usd_turnout), Candidates = mean(unique_usd)) %>%
+  ggplot(aes(y = reorder(usd_name, m),
+             x = Candidates,
+             fill = m)) +
+  geom_bar(stat = "identity") +
+  scale_fill_continuous(type = "viridis", labels = scales::percent_format(scale = 100)) +
+  scale_x_continuous(breaks = c(2, 4, 6, 8), limits = c(0, 10)) +
+  labs(title = "With more candidates on the ballot, turnout is higher",
+       subtitle = "Maricopa County unified school board races in 2020",
+       x = "Number of Candidates Running",
+       y = "",
+       fill = "Turnout for School Board*",
+       caption = "*most school board elections are 'vote for 3' so percent may exceed 100 \n \n data from Maricopa County Recorder and US Census ACS") +
+  theme_minimal()
+```
+
+
+One hypothesis I had for school board turnout was the number of candidates running. In theory, if more candidates are running (eight people running for three seats as opposed to three people running), each of the candidates will campaign for votes, meaning more people will be encouraged to fill out that portion of the ballot. I put number of candidates running on the x axis (bar length). I then coded color to turnout and ordered the bars by turnout. We see that this holds true within the limited sample we have. The lowest turnout is for races with only three candidates. This means that only three candidates made the ballot but there was one or more write-in candidates (if there are no registered write-in candidates, the three will be appointed as elected and will not appear on the ballot). The higher turnout districts were all 6 or more candidates. I thought about individually labeling the turnout percentages for the bars, but since the bar length represents number of candidates, it did not look right. The legend off to the side doesn't require too much scanning back and forth. Even though nothing explicitly tells us that the bars are arranged by turnout percent, the legend gradient runs parallel in a way that helps the eye perceive that the vertical axis is ordered the same way. I selected a viridis gradient; this should maintain its appearance in black and white printed form (I have given presentations with photocopied packets for attendees) and is colorblind safe.
+
+```{r fig.width=8, fig.height=16}
+
+box1 <- complete2020 %>%
+  na.omit(usd_name) %>%
+  ggplot(aes(y = reorder(usd_name, usd_turnout, FUN = mean),
+             x = usd_turnout,
+             fill = college_plus_pct)) +
+  geom_boxplot() +
+  scale_x_continuous(labels = scales::percent_format(scale = 100)) +
+  scale_fill_gradient(high = "#2d004b", low = "white", labels = scales::percent_format(scale = 100)) +
+  theme_minimal() +
+  labs(title = "Districts with high college graduation rates have high turnout",
+       subtitle = "in Maricopa County 2020 school board elections",
+       x = "Turnout for School Board*",
+       y = "",
+       caption = "*most school board elections are 'vote for 3' so percent may exceed 100 \n \n data from Maricopa County Recorder and US Census ACS",
+       fill = "Percent of College Grads")
+
+box2 <- complete2020 %>%
+  na.omit(usd_name) %>%
+  ggplot(aes(y = reorder(usd_name, usd_turnout, FUN = mean),
+             x = usd_turnout,
+             fill = kids_in_house_pct)) +
+  geom_boxplot() +
+  scale_x_continuous(labels = scales::percent_format(scale = 100)) +
+  scale_fill_gradient(high = "#2d004b", low = "white", labels = scales::percent_format(scale = 100)) +
+  theme_minimal() +
+  labs(title = "Districts with fewer kids have higher turnout",
+       subtitle = "in Maricopa County 2020 school board elections",
+       x = "Turnout for School Board*",
+       y = "",
+       caption = "*most school board elections are 'vote for 3' so percent may exceed 100 \n \n data from Maricopa County Recorder and US Census ACS",
+       fill = "Percent of households with \n one or more under 18")
+
+grid.arrange(box1, box2, ncol = 1)
+
+```
+
+
+I finally include two boxplots that compare distribution for turnout based on district, each with a different variable mapped to color. The first is percent of college grads in the district. This makes sense, and is one of the demographic variables we have at the district level but not at the precinct level. Without more districts, we wouldn't want to make any bold causal claims, but we see a pattern where Cave Creek is disproportionately white, college educated, has a higher median income, and fewer children at home. The fewer children at home may be surprising to some people given that presumably those with children would be most interested in the election outcome. Again, this is a small sample of districts and we don't have the precinct level data to draw broad conclusions. But these kinds of plots can illustrate the results of the regression model that included the district level fixed effect: a lot of the variation in turnout rates can be attributed to commonalities within districts. (Note: I learned about fixed effect models about a week ago, so please forgive my sloppy explanation).
+
+I selected a simple gradient with one hue. Given that the boxes include outlines, I was able to include white. I keep the same vertical order. The gradient in the legend now longer relates back to the vertical order, the school districts remain in the same order from the bar plot earlier. I tried to include titles that would help users read the plots, especially as we have three different variables here. 
